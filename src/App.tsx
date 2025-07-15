@@ -7,6 +7,7 @@ import { Slider } from './components/ui/slider'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './components/ui/select'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './components/ui/tabs'
 import { Badge } from './components/ui/badge'
+import { blink } from './blink/client'
 import { 
   Play, 
   Pause, 
@@ -18,7 +19,12 @@ import {
   Plus,
   Trash2,
   Eye,
-  EyeOff
+  EyeOff,
+  Upload,
+  Mic,
+  Volume2,
+  FileVideo,
+  Loader2
 } from 'lucide-react'
 
 interface TextElement {
@@ -32,6 +38,18 @@ interface TextElement {
   animation: string
   position: { x: number; y: number }
   visible: boolean
+}
+
+interface CaptionSegment {
+  id: string
+  text: string
+  startTime: number
+  duration: number
+  words: Array<{
+    word: string
+    startTime: number
+    duration: number
+  }>
 }
 
 const ANIMATION_PRESETS = [
@@ -56,17 +74,46 @@ const BACKGROUND_OPTIONS = [
   { value: 'solid-cyan', label: 'Cyan', style: '#00F2EA' }
 ]
 
+const TTS_VOICES = [
+  { value: 'alloy', label: 'Alloy (Neutral)' },
+  { value: 'echo', label: 'Echo (Male)' },
+  { value: 'fable', label: 'Fable (British Male)' },
+  { value: 'onyx', label: 'Onyx (Deep Male)' },
+  { value: 'nova', label: 'Nova (Female)' },
+  { value: 'shimmer', label: 'Shimmer (Female)' }
+]
+
 function App() {
+  const [user, setUser] = useState(null)
+  const [loading, setLoading] = useState(true)
   const [textElements, setTextElements] = useState<TextElement[]>([])
+  const [captions, setCaptions] = useState<CaptionSegment[]>([])
   const [selectedElement, setSelectedElement] = useState<string | null>(null)
   const [currentTime, setCurrentTime] = useState(0)
   const [isPlaying, setIsPlaying] = useState(false)
-  const [videoDuration] = useState(15) // 15 seconds default
+  const [videoDuration, setVideoDuration] = useState(15)
   const [background, setBackground] = useState(BACKGROUND_OPTIONS[0])
+  const [customVideoUrl, setCustomVideoUrl] = useState<string | null>(null)
   const [newText, setNewText] = useState('')
+  const [ttsText, setTtsText] = useState('')
+  const [selectedVoice, setSelectedVoice] = useState(TTS_VOICES[0].value)
+  const [isGeneratingTTS, setIsGeneratingTTS] = useState(false)
+  const [audioUrl, setAudioUrl] = useState<string | null>(null)
   
   const canvasRef = useRef<HTMLDivElement>(null)
+  const videoRef = useRef<HTMLVideoElement>(null)
+  const audioRef = useRef<HTMLAudioElement>(null)
   const intervalRef = useRef<NodeJS.Timeout | null>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // Auth state management
+  useEffect(() => {
+    const unsubscribe = blink.auth.onAuthStateChanged((state) => {
+      setUser(state.user)
+      setLoading(state.isLoading)
+    })
+    return unsubscribe
+  }, [])
 
   // Animation playback
   useEffect(() => {
@@ -92,6 +139,124 @@ function App() {
       }
     }
   }, [isPlaying, videoDuration])
+
+  // Sync video and audio playback
+  useEffect(() => {
+    if (videoRef.current) {
+      videoRef.current.currentTime = currentTime
+      if (isPlaying) {
+        videoRef.current.play()
+      } else {
+        videoRef.current.pause()
+      }
+    }
+    
+    if (audioRef.current) {
+      audioRef.current.currentTime = currentTime
+      if (isPlaying) {
+        audioRef.current.play()
+      } else {
+        audioRef.current.pause()
+      }
+    }
+  }, [currentTime, isPlaying])
+
+  const handleVideoUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    try {
+      const { publicUrl } = await blink.storage.upload(
+        file,
+        `videos/${file.name}`,
+        { upsert: true }
+      )
+      
+      setCustomVideoUrl(publicUrl)
+      
+      // Create a temporary video element to get duration
+      const tempVideo = document.createElement('video')
+      tempVideo.src = publicUrl
+      tempVideo.onloadedmetadata = () => {
+        setVideoDuration(tempVideo.duration)
+        tempVideo.remove()
+      }
+    } catch (error) {
+      console.error('Error uploading video:', error)
+      alert('Failed to upload video. Please try again.')
+    }
+  }
+
+  const generateTTSWithCaptions = async () => {
+    if (!ttsText.trim()) return
+
+    setIsGeneratingTTS(true)
+    try {
+      // Generate speech
+      const { url: speechUrl } = await blink.ai.generateSpeech({
+        text: ttsText,
+        voice: selectedVoice as any
+      })
+      
+      setAudioUrl(speechUrl)
+
+      // Create auto-captions by splitting text into segments
+      // This is a simplified version - in a real app you'd use speech recognition
+      // to get precise timing from the audio
+      const words = ttsText.split(' ')
+      const avgWordsPerSecond = 2.5 // Approximate speaking rate
+      const segmentDuration = 3 // Show each caption for 3 seconds
+      const segments: CaptionSegment[] = []
+      
+      let currentTime = 0
+      for (let i = 0; i < words.length; i += Math.floor(avgWordsPerSecond * segmentDuration)) {
+        const segmentWords = words.slice(i, i + Math.floor(avgWordsPerSecond * segmentDuration))
+        const segmentText = segmentWords.join(' ')
+        
+        const wordTimings = segmentWords.map((word, index) => ({
+          word,
+          startTime: currentTime + (index / avgWordsPerSecond),
+          duration: 1 / avgWordsPerSecond
+        }))
+
+        segments.push({
+          id: `caption-${i}`,
+          text: segmentText,
+          startTime: currentTime,
+          duration: segmentDuration,
+          words: wordTimings
+        })
+        
+        currentTime += segmentDuration
+      }
+      
+      setCaptions(segments)
+      
+      // Auto-add caption text elements
+      segments.forEach((segment, index) => {
+        const captionElement: TextElement = {
+          id: `auto-caption-${index}`,
+          text: segment.text,
+          startTime: segment.startTime,
+          duration: segment.duration,
+          fontSize: 28,
+          color: '#FFFFFF',
+          fontWeight: '600',
+          animation: 'fade',
+          position: { x: 50, y: 85 }, // Bottom of screen
+          visible: true
+        }
+        
+        setTextElements(prev => [...prev, captionElement])
+      })
+      
+    } catch (error) {
+      console.error('Error generating TTS:', error)
+      alert('Failed to generate speech. Please try again.')
+    } finally {
+      setIsGeneratingTTS(false)
+    }
+  }
 
   const addTextElement = () => {
     if (!newText.trim()) return
@@ -151,8 +316,39 @@ function App() {
   }
 
   const exportVideo = () => {
-    // Placeholder for video export functionality
     alert('Video export functionality would be implemented here!')
+  }
+
+  const clearCaptions = () => {
+    setCaptions([])
+    setTextElements(prev => prev.filter(el => !el.id.startsWith('auto-caption-')))
+    setAudioUrl(null)
+  }
+
+  if (loading) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="text-center">
+          <Loader2 className="h-8 w-8 animate-spin mx-auto mb-4" />
+          <p>Loading...</p>
+        </div>
+      </div>
+    )
+  }
+
+  if (!user) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="text-center">
+          <Sparkles className="h-12 w-12 text-primary mx-auto mb-4" />
+          <h1 className="text-2xl font-bold mb-2">TikTok Video Creator</h1>
+          <p className="text-muted-foreground mb-4">Please sign in to continue</p>
+          <Button onClick={() => blink.auth.login()}>
+            Sign In
+          </Button>
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -167,6 +363,7 @@ function App() {
             </div>
           </div>
           <div className="flex items-center gap-3">
+            <span className="text-sm text-muted-foreground">Welcome, {user.email}</span>
             <Button variant="outline" onClick={resetPlayback}>
               Reset
             </Button>
@@ -182,11 +379,93 @@ function App() {
         {/* Left Panel - Controls */}
         <div className="w-80 border-r border-border bg-card overflow-y-auto">
           <div className="p-4 space-y-6">
+            {/* Video Background */}
+            <Card className="p-4">
+              <h3 className="font-semibold mb-3 flex items-center gap-2">
+                <FileVideo className="h-4 w-4" />
+                Video Background
+              </h3>
+              <div className="space-y-3">
+                <Button
+                  variant="outline"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="w-full"
+                >
+                  <Upload className="h-4 w-4 mr-2" />
+                  Upload Custom Video
+                </Button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="video/*"
+                  onChange={handleVideoUpload}
+                  className="hidden"
+                />
+                {customVideoUrl && (
+                  <div className="text-sm text-green-400">
+                    ✓ Custom video uploaded
+                  </div>
+                )}
+              </div>
+            </Card>
+
+            {/* Text-to-Speech */}
+            <Card className="p-4">
+              <h3 className="font-semibold mb-3 flex items-center gap-2">
+                <Mic className="h-4 w-4" />
+                Text-to-Speech & Auto Captions
+              </h3>
+              <div className="space-y-3">
+                <Textarea
+                  placeholder="Enter text to convert to speech with auto captions..."
+                  value={ttsText}
+                  onChange={(e) => setTtsText(e.target.value)}
+                  className="min-h-[80px]"
+                />
+                <Select value={selectedVoice} onValueChange={setSelectedVoice}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {TTS_VOICES.map(voice => (
+                      <SelectItem key={voice.value} value={voice.value}>
+                        {voice.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <div className="flex gap-2">
+                  <Button 
+                    onClick={generateTTSWithCaptions} 
+                    disabled={!ttsText.trim() || isGeneratingTTS}
+                    className="flex-1"
+                  >
+                    {isGeneratingTTS ? (
+                      <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                    ) : (
+                      <Volume2 className="h-4 w-4 mr-2" />
+                    )}
+                    Generate
+                  </Button>
+                  {captions.length > 0 && (
+                    <Button variant="outline" onClick={clearCaptions}>
+                      Clear
+                    </Button>
+                  )}
+                </div>
+                {captions.length > 0 && (
+                  <div className="text-sm text-green-400">
+                    ✓ {captions.length} caption segments generated
+                  </div>
+                )}
+              </div>
+            </Card>
+
             {/* Add Text */}
             <Card className="p-4">
               <h3 className="font-semibold mb-3 flex items-center gap-2">
                 <Type className="h-4 w-4" />
-                Add Text
+                Add Manual Text
               </h3>
               <div className="space-y-3">
                 <Textarea
@@ -203,33 +482,35 @@ function App() {
             </Card>
 
             {/* Background */}
-            <Card className="p-4">
-              <h3 className="font-semibold mb-3 flex items-center gap-2">
-                <Palette className="h-4 w-4" />
-                Background
-              </h3>
-              <Select value={background.value} onValueChange={(value) => {
-                const bg = BACKGROUND_OPTIONS.find(b => b.value === value)
-                if (bg) setBackground(bg)
-              }}>
-                <SelectTrigger>
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {BACKGROUND_OPTIONS.map(bg => (
-                    <SelectItem key={bg.value} value={bg.value}>
-                      <div className="flex items-center gap-2">
-                        <div 
-                          className="w-4 h-4 rounded border"
-                          style={{ background: bg.style }}
-                        />
-                        {bg.label}
-                      </div>
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </Card>
+            {!customVideoUrl && (
+              <Card className="p-4">
+                <h3 className="font-semibold mb-3 flex items-center gap-2">
+                  <Palette className="h-4 w-4" />
+                  Background
+                </h3>
+                <Select value={background.value} onValueChange={(value) => {
+                  const bg = BACKGROUND_OPTIONS.find(b => b.value === value)
+                  if (bg) setBackground(bg)
+                }}>
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {BACKGROUND_OPTIONS.map(bg => (
+                      <SelectItem key={bg.value} value={bg.value}>
+                        <div className="flex items-center gap-2">
+                          <div 
+                            className="w-4 h-4 rounded border"
+                            style={{ background: bg.style }}
+                          />
+                          {bg.label}
+                        </div>
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </Card>
+            )}
 
             {/* Text Elements List */}
             <Card className="p-4">
@@ -250,6 +531,9 @@ function App() {
                         <p className="text-sm font-medium truncate">{element.text}</p>
                         <p className="text-xs text-muted-foreground">
                           {element.startTime.toFixed(1)}s - {(element.startTime + element.duration).toFixed(1)}s
+                          {element.id.startsWith('auto-caption-') && (
+                            <span className="ml-2 text-accent">Auto Caption</span>
+                          )}
                         </p>
                       </div>
                       <div className="flex items-center gap-1 ml-2">
@@ -403,8 +687,19 @@ function App() {
               <div 
                 ref={canvasRef}
                 className="w-[300px] h-[533px] relative overflow-hidden rounded-lg border-2 border-border shadow-2xl"
-                style={{ background: background.style }}
+                style={{ background: customVideoUrl ? 'transparent' : background.style }}
               >
+                {/* Custom Video Background */}
+                {customVideoUrl && (
+                  <video
+                    ref={videoRef}
+                    src={customVideoUrl}
+                    className="absolute inset-0 w-full h-full object-cover"
+                    muted
+                    loop
+                  />
+                )}
+
                 {/* Text Elements */}
                 {getVisibleElements().map(element => (
                   <div
@@ -459,11 +754,16 @@ function App() {
               </Button>
               <div className="flex items-center gap-2 text-sm">
                 <Clock className="h-4 w-4" />
-                <span>{currentTime.toFixed(1)}s / {videoDuration}s</span>
+                <span>{currentTime.toFixed(1)}s / {videoDuration.toFixed(1)}s</span>
               </div>
               <Badge variant="secondary">
                 {textElements.length} text element{textElements.length !== 1 ? 's' : ''}
               </Badge>
+              {captions.length > 0 && (
+                <Badge variant="outline" className="text-accent border-accent">
+                  {captions.length} auto captions
+                </Badge>
+              )}
             </div>
             
             {/* Timeline Scrubber */}
@@ -478,12 +778,21 @@ function App() {
               />
               <div className="flex justify-between text-xs text-muted-foreground">
                 <span>0s</span>
-                <span>{videoDuration}s</span>
+                <span>{videoDuration.toFixed(1)}s</span>
               </div>
             </div>
           </div>
         </div>
       </div>
+
+      {/* Hidden audio element for TTS playback */}
+      {audioUrl && (
+        <audio
+          ref={audioRef}
+          src={audioUrl}
+          className="hidden"
+        />
+      )}
     </div>
   )
 }
