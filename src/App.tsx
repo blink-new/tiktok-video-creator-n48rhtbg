@@ -52,6 +52,18 @@ interface CaptionSegment {
   }>
 }
 
+interface WordElement {
+  id: string
+  word: string
+  startTime: number
+  duration: number
+  fontSize: number
+  color: string
+  fontWeight: string
+  animation: string
+  position: { x: number; y: number }
+}
+
 const ANIMATION_PRESETS = [
   { value: 'fade', label: 'Fade In' },
   { value: 'slide-up', label: 'Slide Up' },
@@ -88,6 +100,7 @@ function App() {
   const [loading, setLoading] = useState(true)
   const [textElements, setTextElements] = useState<TextElement[]>([])
   const [captions, setCaptions] = useState<CaptionSegment[]>([])
+  const [wordElements, setWordElements] = useState<WordElement[]>([])
   const [selectedElement, setSelectedElement] = useState<string | null>(null)
   const [currentTime, setCurrentTime] = useState(0)
   const [isPlaying, setIsPlaying] = useState(false)
@@ -200,55 +213,56 @@ function App() {
       
       setAudioUrl(speechUrl)
 
-      // Create auto-captions by splitting text into segments
-      // This is a simplified version - in a real app you'd use speech recognition
-      // to get precise timing from the audio
-      const words = ttsText.split(' ')
-      const avgWordsPerSecond = 2.5 // Approximate speaking rate
-      const segmentDuration = 3 // Show each caption for 3 seconds
-      const segments: CaptionSegment[] = []
+      // Create word-by-word captions with precise timing
+      const words = ttsText.split(/\s+/).filter(word => word.length > 0)
+      const avgWordsPerSecond = 2.2 // Slightly slower for better readability
+      const wordDuration = 1 / avgWordsPerSecond // Duration each word is shown
       
-      let currentTime = 0
-      for (let i = 0; i < words.length; i += Math.floor(avgWordsPerSecond * segmentDuration)) {
-        const segmentWords = words.slice(i, i + Math.floor(avgWordsPerSecond * segmentDuration))
+      // Create individual word elements
+      const newWordElements: WordElement[] = words.map((word, index) => ({
+        id: `word-${index}`,
+        word: word.replace(/[.,!?;:]$/, ''), // Clean punctuation for display
+        startTime: index * wordDuration,
+        duration: wordDuration,
+        fontSize: 32,
+        color: '#FFFFFF',
+        fontWeight: '700',
+        animation: 'word-pop',
+        position: { x: 50, y: 85 } // Bottom center of screen
+      }))
+      
+      setWordElements(newWordElements)
+      
+      // Create caption segments for reference (optional)
+      const segments: CaptionSegment[] = []
+      const wordsPerSegment = Math.ceil(avgWordsPerSecond * 3) // 3 seconds per segment
+      
+      for (let i = 0; i < words.length; i += wordsPerSegment) {
+        const segmentWords = words.slice(i, i + wordsPerSegment)
         const segmentText = segmentWords.join(' ')
+        const startTime = i * wordDuration
+        const duration = segmentWords.length * wordDuration
         
         const wordTimings = segmentWords.map((word, index) => ({
           word,
-          startTime: currentTime + (index / avgWordsPerSecond),
-          duration: 1 / avgWordsPerSecond
+          startTime: startTime + (index * wordDuration),
+          duration: wordDuration
         }))
 
         segments.push({
           id: `caption-${i}`,
           text: segmentText,
-          startTime: currentTime,
-          duration: segmentDuration,
+          startTime,
+          duration,
           words: wordTimings
         })
-        
-        currentTime += segmentDuration
       }
       
       setCaptions(segments)
       
-      // Auto-add caption text elements
-      segments.forEach((segment, index) => {
-        const captionElement: TextElement = {
-          id: `auto-caption-${index}`,
-          text: segment.text,
-          startTime: segment.startTime,
-          duration: segment.duration,
-          fontSize: 28,
-          color: '#FFFFFF',
-          fontWeight: '600',
-          animation: 'fade',
-          position: { x: 50, y: 85 }, // Bottom of screen
-          visible: true
-        }
-        
-        setTextElements(prev => [...prev, captionElement])
-      })
+      // Update video duration to match speech length
+      const totalDuration = Math.max(words.length * wordDuration + 1, videoDuration)
+      setVideoDuration(totalDuration)
       
     } catch (error) {
       console.error('Error generating TTS:', error)
@@ -304,6 +318,13 @@ function App() {
     )
   }
 
+  const getCurrentWord = () => {
+    return wordElements.find(word => 
+      currentTime >= word.startTime && 
+      currentTime < word.startTime + word.duration
+    )
+  }
+
   const selectedElementData = textElements.find(el => el.id === selectedElement)
 
   const togglePlayback = () => {
@@ -321,6 +342,7 @@ function App() {
 
   const clearCaptions = () => {
     setCaptions([])
+    setWordElements([])
     setTextElements(prev => prev.filter(el => !el.id.startsWith('auto-caption-')))
     setAudioUrl(null)
   }
@@ -447,15 +469,15 @@ function App() {
                     )}
                     Generate
                   </Button>
-                  {captions.length > 0 && (
+                  {wordElements.length > 0 && (
                     <Button variant="outline" onClick={clearCaptions}>
                       Clear
                     </Button>
                   )}
                 </div>
-                {captions.length > 0 && (
+                {wordElements.length > 0 && (
                   <div className="text-sm text-green-400">
-                    ✓ {captions.length} caption segments generated
+                    ✓ {wordElements.length} words ready for animation
                   </div>
                 )}
               </div>
@@ -700,7 +722,7 @@ function App() {
                   />
                 )}
 
-                {/* Text Elements */}
+                {/* Manual Text Elements */}
                 {getVisibleElements().map(element => (
                   <div
                     key={element.id}
@@ -731,6 +753,31 @@ function App() {
                     {element.text}
                   </div>
                 ))}
+
+                {/* Animated Word Captions */}
+                {(() => {
+                  const currentWord = getCurrentWord()
+                  return currentWord ? (
+                    <div
+                      key={currentWord.id}
+                      className="absolute text-center font-inter animate-word-pop select-none"
+                      style={{
+                        left: `${currentWord.position.x}%`,
+                        top: `${currentWord.position.y}%`,
+                        transform: 'translate(-50%, -50%)',
+                        fontSize: `${currentWord.fontSize}px`,
+                        color: currentWord.color,
+                        fontWeight: currentWord.fontWeight,
+                        textShadow: '3px 3px 6px rgba(0,0,0,0.9)',
+                        maxWidth: '90%',
+                        wordWrap: 'break-word',
+                        zIndex: 10
+                      }}
+                    >
+                      {currentWord.word}
+                    </div>
+                  ) : null
+                })()}
                 
                 {/* Canvas overlay for selection */}
                 <div className="absolute inset-0 pointer-events-none">
@@ -759,9 +806,9 @@ function App() {
               <Badge variant="secondary">
                 {textElements.length} text element{textElements.length !== 1 ? 's' : ''}
               </Badge>
-              {captions.length > 0 && (
+              {wordElements.length > 0 && (
                 <Badge variant="outline" className="text-accent border-accent">
-                  {captions.length} auto captions
+                  {wordElements.length} words ready for animation
                 </Badge>
               )}
             </div>

@@ -108,6 +108,10 @@
   .animate-slide-right {
     animation: slide-right 0.5s ease-out;
   }
+  
+  .animate-word-pop {
+    animation: word-pop 0.3s ease-out;
+  }
 }
 
 @keyframes typewriter {
@@ -165,5 +169,22 @@
   100% {
     opacity: 100%;
     transform: translate(-50%, -50%);
+  }
+}
+
+@keyframes word-pop {
+  0% {
+    opacity: 0%;
+    transform: translate(-50%, -50%) scale(0.8);
+  }
+  
+  50% {
+    opacity: 100%;
+    transform: translate(-50%, -50%) scale(1.1);
+  }
+
+  100% {
+    opacity: 100%;
+    transform: translate(-50%, -50%) scale(1);
   }
 }
