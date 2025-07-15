@@ -112,6 +112,7 @@ function App() {
   const [selectedVoice, setSelectedVoice] = useState(TTS_VOICES[0].value)
   const [isGeneratingTTS, setIsGeneratingTTS] = useState(false)
   const [audioUrl, setAudioUrl] = useState<string | null>(null)
+  const [audioOffset, setAudioOffset] = useState(0) // Audio sync offset in seconds
   
   const canvasRef = useRef<HTMLDivElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
@@ -153,26 +154,39 @@ function App() {
     }
   }, [isPlaying, videoDuration])
 
-  // Sync video and audio playback
+  // Sync video and audio playback with better error handling
   useEffect(() => {
-    if (videoRef.current) {
-      videoRef.current.currentTime = currentTime
-      if (isPlaying) {
-        videoRef.current.play()
-      } else {
-        videoRef.current.pause()
+    const syncMedia = async () => {
+      try {
+        if (videoRef.current) {
+          videoRef.current.currentTime = currentTime
+          if (isPlaying) {
+            await videoRef.current.play()
+          } else {
+            videoRef.current.pause()
+          }
+        }
+        
+        if (audioRef.current) {
+          // Ensure audio is loaded before setting time
+          if (audioRef.current.readyState >= 2) {
+            // Apply audio offset for synchronization
+            const adjustedTime = Math.max(0, currentTime + audioOffset)
+            audioRef.current.currentTime = adjustedTime
+            if (isPlaying) {
+              await audioRef.current.play()
+            } else {
+              audioRef.current.pause()
+            }
+          }
+        }
+      } catch (error) {
+        console.warn('Media sync error:', error)
       }
     }
     
-    if (audioRef.current) {
-      audioRef.current.currentTime = currentTime
-      if (isPlaying) {
-        audioRef.current.play()
-      } else {
-        audioRef.current.pause()
-      }
-    }
-  }, [currentTime, isPlaying])
+    syncMedia()
+  }, [audioOffset, currentTime, isPlaying])
 
   const handleVideoUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
@@ -213,56 +227,138 @@ function App() {
       
       setAudioUrl(speechUrl)
 
-      // Create word-by-word captions with precise timing
-      const words = ttsText.split(/\s+/).filter(word => word.length > 0)
-      const avgWordsPerSecond = 2.2 // Slightly slower for better readability
-      const wordDuration = 1 / avgWordsPerSecond // Duration each word is shown
+      // Get actual audio duration for precise timing
+      const audio = new Audio(speechUrl)
+      await new Promise((resolve) => {
+        audio.onloadedmetadata = resolve
+      })
       
-      // Create individual word elements
-      const newWordElements: WordElement[] = words.map((word, index) => ({
-        id: `word-${index}`,
-        word: word.replace(/[.,!?;:]$/, ''), // Clean punctuation for display
-        startTime: index * wordDuration,
-        duration: wordDuration,
-        fontSize: 32,
-        color: '#FFFFFF',
-        fontWeight: '700',
-        animation: 'word-pop',
-        position: { x: 50, y: 85 } // Bottom center of screen
-      }))
+      const actualAudioDuration = audio.duration
+      
+      // Create word-by-word captions with precise timing based on actual audio duration
+      const words = ttsText.split(/\s+/).filter(word => word.length > 0)
+      
+      // Calculate timing based on actual audio duration
+      const totalWords = words.length
+      const baseWordDuration = actualAudioDuration / totalWords
+      
+      // Adjust timing based on word characteristics for more natural flow
+      const wordTimings = words.map((word, index) => {
+        // Longer words get slightly more time, punctuation gets pause
+        const wordLength = word.length
+        const hasPunctuation = /[.,!?;:]$/.test(word)
+        
+        let adjustedDuration = baseWordDuration
+        
+        // Longer words get 10% more time
+        if (wordLength > 6) {
+          adjustedDuration *= 1.1
+        }
+        
+        // Words with punctuation get 20% more time for natural pauses
+        if (hasPunctuation) {
+          adjustedDuration *= 1.2
+        }
+        
+        return {
+          word,
+          duration: adjustedDuration,
+          hasPunctuation
+        }
+      })
+      
+      // Calculate start times ensuring total duration matches audio
+      let currentTime = 0
+      const totalCalculatedDuration = wordTimings.reduce((sum, w) => sum + w.duration, 0)
+      const timeScale = actualAudioDuration / totalCalculatedDuration
+      
+      // Create individual word elements with precise timing
+      const newWordElements: WordElement[] = wordTimings.map((wordTiming, index) => {
+        const scaledDuration = wordTiming.duration * timeScale
+        const element = {
+          id: `word-${index}`,
+          word: wordTiming.word.replace(/[.,!?;:]$/, ''), // Clean punctuation for display
+          startTime: currentTime,
+          duration: scaledDuration,
+          fontSize: 32,
+          color: '#FFFFFF',
+          fontWeight: '700',
+          animation: 'word-pop',
+          position: { x: 50, y: 85 } // Bottom center of screen
+        }
+        
+        currentTime += scaledDuration
+        return element
+      })
       
       setWordElements(newWordElements)
       
-      // Create caption segments for reference (optional)
+      // Create caption segments for reference with better grouping
       const segments: CaptionSegment[] = []
-      const wordsPerSegment = Math.ceil(avgWordsPerSecond * 3) // 3 seconds per segment
+      const maxSegmentDuration = 3.0 // Max 3 seconds per segment
       
-      for (let i = 0; i < words.length; i += wordsPerSegment) {
-        const segmentWords = words.slice(i, i + wordsPerSegment)
-        const segmentText = segmentWords.join(' ')
-        const startTime = i * wordDuration
-        const duration = segmentWords.length * wordDuration
+      let segmentStart = 0
+      let segmentWords: typeof wordTimings = []
+      let segmentDuration = 0
+      
+      for (let i = 0; i < wordTimings.length; i++) {
+        const wordTiming = wordTimings[i]
+        const scaledDuration = wordTiming.duration * timeScale
         
-        const wordTimings = segmentWords.map((word, index) => ({
-          word,
-          startTime: startTime + (index * wordDuration),
-          duration: wordDuration
+        // Check if adding this word would exceed max duration or if it's a natural break
+        if (segmentDuration + scaledDuration > maxSegmentDuration || 
+            (wordTiming.hasPunctuation && segmentWords.length > 0)) {
+          
+          // Create segment from accumulated words
+          if (segmentWords.length > 0) {
+            const segmentText = segmentWords.map(w => w.word).join(' ')
+            const wordTimingsForSegment = segmentWords.map((w, idx) => ({
+              word: w.word,
+              startTime: segmentStart + (idx > 0 ? segmentWords.slice(0, idx).reduce((sum, prev) => sum + prev.duration * timeScale, 0) : 0),
+              duration: w.duration * timeScale
+            }))
+
+            segments.push({
+              id: `caption-${segments.length}`,
+              text: segmentText,
+              startTime: segmentStart,
+              duration: segmentDuration,
+              words: wordTimingsForSegment
+            })
+          }
+          
+          // Start new segment
+          segmentStart += segmentDuration
+          segmentWords = [wordTiming]
+          segmentDuration = scaledDuration
+        } else {
+          segmentWords.push(wordTiming)
+          segmentDuration += scaledDuration
+        }
+      }
+      
+      // Add final segment
+      if (segmentWords.length > 0) {
+        const segmentText = segmentWords.map(w => w.word).join(' ')
+        const wordTimingsForSegment = segmentWords.map((w, idx) => ({
+          word: w.word,
+          startTime: segmentStart + (idx > 0 ? segmentWords.slice(0, idx).reduce((sum, prev) => sum + prev.duration * timeScale, 0) : 0),
+          duration: w.duration * timeScale
         }))
 
         segments.push({
-          id: `caption-${i}`,
+          id: `caption-${segments.length}`,
           text: segmentText,
-          startTime,
-          duration,
-          words: wordTimings
+          startTime: segmentStart,
+          duration: segmentDuration,
+          words: wordTimingsForSegment
         })
       }
       
       setCaptions(segments)
       
-      // Update video duration to match speech length
-      const totalDuration = Math.max(words.length * wordDuration + 1, videoDuration)
-      setVideoDuration(totalDuration)
+      // Update video duration to match actual audio length with small buffer
+      setVideoDuration(Math.max(actualAudioDuration + 0.5, videoDuration))
       
     } catch (error) {
       console.error('Error generating TTS:', error)
@@ -345,6 +441,7 @@ function App() {
     setWordElements([])
     setTextElements(prev => prev.filter(el => !el.id.startsWith('auto-caption-')))
     setAudioUrl(null)
+    setAudioOffset(0)
   }
 
   if (loading) {
@@ -478,6 +575,31 @@ function App() {
                 {wordElements.length > 0 && (
                   <div className="text-sm text-green-400">
                     ✓ {wordElements.length} words ready for animation
+                  </div>
+                )}
+                {audioUrl && (
+                  <div className="space-y-2">
+                    <label className="text-sm font-medium">Audio Sync Offset: {audioOffset.toFixed(2)}s</label>
+                    <Slider
+                      value={[audioOffset]}
+                      onValueChange={([value]) => setAudioOffset(value)}
+                      min={-2}
+                      max={2}
+                      step={0.05}
+                      className="w-full"
+                    />
+                    <div className="flex justify-between items-center text-xs text-muted-foreground">
+                      <span>-2s (Audio Earlier)</span>
+                      <Button 
+                        size="sm" 
+                        variant="ghost" 
+                        onClick={() => setAudioOffset(0)}
+                        className="h-6 px-2 text-xs"
+                      >
+                        Reset
+                      </Button>
+                      <span>+2s (Audio Later)</span>
+                    </div>
                   </div>
                 )}
               </div>
@@ -771,13 +893,51 @@ function App() {
                         textShadow: '3px 3px 6px rgba(0,0,0,0.9)',
                         maxWidth: '90%',
                         wordWrap: 'break-word',
-                        zIndex: 10
+                        zIndex: 10,
+                        background: 'rgba(0,0,0,0.3)',
+                        padding: '4px 8px',
+                        borderRadius: '4px',
+                        border: '2px solid rgba(255,255,255,0.2)'
                       }}
                     >
                       {currentWord.word}
                     </div>
                   ) : null
                 })()}
+
+                {/* Word Progress Indicator */}
+                {wordElements.length > 0 && (
+                  <div className="absolute bottom-4 left-4 right-4 bg-black/50 rounded-lg p-2">
+                    <div className="flex flex-wrap gap-1 text-xs">
+                      {wordElements.map((word, index) => {
+                        const isActive = currentTime >= word.startTime && currentTime < word.startTime + word.duration
+                        const isPast = currentTime >= word.startTime + word.duration
+                        return (
+                          <span
+                            key={word.id}
+                            className={`px-1 py-0.5 rounded transition-all duration-200 ${
+                              isActive 
+                                ? 'bg-primary text-white font-bold scale-110' 
+                                : isPast 
+                                ? 'text-gray-400' 
+                                : 'text-white/70'
+                            }`}
+                          >
+                            {word.word}
+                          </span>
+                        )
+                      })}
+                    </div>
+                    <div className="mt-1 h-1 bg-gray-700 rounded-full overflow-hidden">
+                      <div 
+                        className="h-full bg-primary transition-all duration-100 ease-linear"
+                        style={{
+                          width: `${Math.min(100, (currentTime / (wordElements[wordElements.length - 1]?.startTime + wordElements[wordElements.length - 1]?.duration || 1)) * 100)}%`
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
                 
                 {/* Canvas overlay for selection */}
                 <div className="absolute inset-0 pointer-events-none">
