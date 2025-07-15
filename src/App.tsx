@@ -40,17 +40,7 @@ interface TextElement {
   visible: boolean
 }
 
-interface CaptionSegment {
-  id: string
-  text: string
-  startTime: number
-  duration: number
-  words: Array<{
-    word: string
-    startTime: number
-    duration: number
-  }>
-}
+
 
 interface WordElement {
   id: string
@@ -99,7 +89,7 @@ function App() {
   const [user, setUser] = useState(null)
   const [loading, setLoading] = useState(true)
   const [textElements, setTextElements] = useState<TextElement[]>([])
-  const [captions, setCaptions] = useState<CaptionSegment[]>([])
+
   const [wordElements, setWordElements] = useState<WordElement[]>([])
   const [selectedElement, setSelectedElement] = useState<string | null>(null)
   const [currentTime, setCurrentTime] = useState(0)
@@ -235,127 +225,24 @@ function App() {
       
       const actualAudioDuration = audio.duration
       
-      // Create word-by-word captions with precise timing based on actual audio duration
+      // Simple word-by-word timing - evenly distribute words across audio duration
       const words = ttsText.split(/\s+/).filter(word => word.length > 0)
+      const wordDuration = actualAudioDuration / words.length
       
-      // Calculate timing based on actual audio duration
-      const totalWords = words.length
-      const baseWordDuration = actualAudioDuration / totalWords
-      
-      // Adjust timing based on word characteristics for more natural flow
-      const wordTimings = words.map((word, index) => {
-        // Longer words get slightly more time, punctuation gets pause
-        const wordLength = word.length
-        const hasPunctuation = /[.,!?;:]$/.test(word)
-        
-        let adjustedDuration = baseWordDuration
-        
-        // Longer words get 10% more time
-        if (wordLength > 6) {
-          adjustedDuration *= 1.1
-        }
-        
-        // Words with punctuation get 20% more time for natural pauses
-        if (hasPunctuation) {
-          adjustedDuration *= 1.2
-        }
-        
-        return {
-          word,
-          duration: adjustedDuration,
-          hasPunctuation
-        }
-      })
-      
-      // Calculate start times ensuring total duration matches audio
-      let currentTime = 0
-      const totalCalculatedDuration = wordTimings.reduce((sum, w) => sum + w.duration, 0)
-      const timeScale = actualAudioDuration / totalCalculatedDuration
-      
-      // Create individual word elements with precise timing
-      const newWordElements: WordElement[] = wordTimings.map((wordTiming, index) => {
-        const scaledDuration = wordTiming.duration * timeScale
-        const element = {
-          id: `word-${index}`,
-          word: wordTiming.word.replace(/[.,!?;:]$/, ''), // Clean punctuation for display
-          startTime: currentTime,
-          duration: scaledDuration,
-          fontSize: 32,
-          color: '#FFFFFF',
-          fontWeight: '700',
-          animation: 'word-pop',
-          position: { x: 50, y: 85 } // Bottom center of screen
-        }
-        
-        currentTime += scaledDuration
-        return element
-      })
+      // Create individual word elements with simple, even timing
+      const newWordElements: WordElement[] = words.map((word, index) => ({
+        id: `word-${index}`,
+        word: word.replace(/[.,!?;:]$/, ''), // Clean punctuation for display
+        startTime: index * wordDuration,
+        duration: wordDuration,
+        fontSize: 32,
+        color: '#FFFFFF',
+        fontWeight: '700',
+        animation: 'word-pop',
+        position: { x: 50, y: 85 } // Bottom center of screen
+      }))
       
       setWordElements(newWordElements)
-      
-      // Create caption segments for reference with better grouping
-      const segments: CaptionSegment[] = []
-      const maxSegmentDuration = 3.0 // Max 3 seconds per segment
-      
-      let segmentStart = 0
-      let segmentWords: typeof wordTimings = []
-      let segmentDuration = 0
-      
-      for (let i = 0; i < wordTimings.length; i++) {
-        const wordTiming = wordTimings[i]
-        const scaledDuration = wordTiming.duration * timeScale
-        
-        // Check if adding this word would exceed max duration or if it's a natural break
-        if (segmentDuration + scaledDuration > maxSegmentDuration || 
-            (wordTiming.hasPunctuation && segmentWords.length > 0)) {
-          
-          // Create segment from accumulated words
-          if (segmentWords.length > 0) {
-            const segmentText = segmentWords.map(w => w.word).join(' ')
-            const wordTimingsForSegment = segmentWords.map((w, idx) => ({
-              word: w.word,
-              startTime: segmentStart + (idx > 0 ? segmentWords.slice(0, idx).reduce((sum, prev) => sum + prev.duration * timeScale, 0) : 0),
-              duration: w.duration * timeScale
-            }))
-
-            segments.push({
-              id: `caption-${segments.length}`,
-              text: segmentText,
-              startTime: segmentStart,
-              duration: segmentDuration,
-              words: wordTimingsForSegment
-            })
-          }
-          
-          // Start new segment
-          segmentStart += segmentDuration
-          segmentWords = [wordTiming]
-          segmentDuration = scaledDuration
-        } else {
-          segmentWords.push(wordTiming)
-          segmentDuration += scaledDuration
-        }
-      }
-      
-      // Add final segment
-      if (segmentWords.length > 0) {
-        const segmentText = segmentWords.map(w => w.word).join(' ')
-        const wordTimingsForSegment = segmentWords.map((w, idx) => ({
-          word: w.word,
-          startTime: segmentStart + (idx > 0 ? segmentWords.slice(0, idx).reduce((sum, prev) => sum + prev.duration * timeScale, 0) : 0),
-          duration: w.duration * timeScale
-        }))
-
-        segments.push({
-          id: `caption-${segments.length}`,
-          text: segmentText,
-          startTime: segmentStart,
-          duration: segmentDuration,
-          words: wordTimingsForSegment
-        })
-      }
-      
-      setCaptions(segments)
       
       // Update video duration to match actual audio length with small buffer
       setVideoDuration(Math.max(actualAudioDuration + 0.5, videoDuration))
@@ -437,7 +324,6 @@ function App() {
   }
 
   const clearCaptions = () => {
-    setCaptions([])
     setWordElements([])
     setTextElements(prev => prev.filter(el => !el.id.startsWith('auto-caption-')))
     setAudioUrl(null)
@@ -905,39 +791,7 @@ function App() {
                   ) : null
                 })()}
 
-                {/* Word Progress Indicator */}
-                {wordElements.length > 0 && (
-                  <div className="absolute bottom-4 left-4 right-4 bg-black/50 rounded-lg p-2">
-                    <div className="flex flex-wrap gap-1 text-xs">
-                      {wordElements.map((word, index) => {
-                        const isActive = currentTime >= word.startTime && currentTime < word.startTime + word.duration
-                        const isPast = currentTime >= word.startTime + word.duration
-                        return (
-                          <span
-                            key={word.id}
-                            className={`px-1 py-0.5 rounded transition-all duration-200 ${
-                              isActive 
-                                ? 'bg-primary text-white font-bold scale-110' 
-                                : isPast 
-                                ? 'text-gray-400' 
-                                : 'text-white/70'
-                            }`}
-                          >
-                            {word.word}
-                          </span>
-                        )
-                      })}
-                    </div>
-                    <div className="mt-1 h-1 bg-gray-700 rounded-full overflow-hidden">
-                      <div 
-                        className="h-full bg-primary transition-all duration-100 ease-linear"
-                        style={{
-                          width: `${Math.min(100, (currentTime / (wordElements[wordElements.length - 1]?.startTime + wordElements[wordElements.length - 1]?.duration || 1)) * 100)}%`
-                        }}
-                      />
-                    </div>
-                  </div>
-                )}
+
                 
                 {/* Canvas overlay for selection */}
                 <div className="absolute inset-0 pointer-events-none">
